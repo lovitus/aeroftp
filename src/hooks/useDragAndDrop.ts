@@ -68,6 +68,8 @@ interface UseDragAndDropParams {
     activeSessionId?: string | null;
     sessions?: Array<{ id: string; connectionParams?: { protocol?: string } }>;
     connectionParams?: { protocol?: string };
+    /** OS files dropped onto the remote panel; captured synchronously before any await. */
+    onExternalFileDrop?: (files: File[], targetDir: string, stops?: number) => Promise<void>;
     /** `stops`: the Stop count when the drop began, before any await (M6). */
     onCrossPanelDrop?: (files: { name: string; path: string }[], fromRemote: boolean, targetDir: string, sourceKey: PanelKey, target?: RemoteDragTarget, stops?: number) => Promise<void>;
     /** The server check of a remote move, taken when the drop starts and run
@@ -92,6 +94,7 @@ export function useDragAndDrop({
     sessions,
     connectionParams,
     onCrossPanelDrop,
+    onExternalFileDrop,
     remoteActionGuard,
     stopCount,
     captureRemoteTarget,
@@ -204,8 +207,10 @@ export function useDragAndDrop({
         e.stopPropagation();
 
         if (!dragData) {
-            e.dataTransfer.dropEffect = 'none';
-            setDropTargetPath(null);
+            const external = targetPanelKey === 'remote' && onExternalFileDrop && Array.from(e.dataTransfer.types || []).includes('Files');
+            e.dataTransfer.dropEffect = external ? 'copy' : 'none';
+            setDropTargetPath(external && isFolder ? targetPath : null);
+            setCrossPanelTarget(external ? targetPanelKey : null);
             return;
         }
 
@@ -270,7 +275,7 @@ export function useDragAndDrop({
             setDropTargetPath(null);
             setCrossPanelTarget(targetPanelKey);
         }
-    }, [dragData]);
+    }, [dragData, onExternalFileDrop]);
 
     /**
      * Move/copy files between the two local panels (or within a single local panel
@@ -334,9 +339,13 @@ export function useDragAndDrop({
         const stops = stopCount?.current;
 
         if (!dragData) {
+            const files = Array.from(e.dataTransfer.files || []);
             setDragData(null);
             setDropTargetPath(null);
             setCrossPanelTarget(null);
+            if (targetPanelKey === 'remote' && files.length) {
+                await onExternalFileDrop?.(files, targetPath, stops);
+            }
             return;
         }
 
@@ -414,7 +423,7 @@ export function useDragAndDrop({
         } else {
             await refreshAfterLocal(sourceKey);
         }
-    }, [dragData, isProvider, humanLog, notify, loadRemoteFiles, refreshAfterLocal, onCrossPanelDrop, performLocalLocalTransfer, remoteActionGuard, captureRemoteTarget, stopCount]);
+    }, [dragData, isProvider, humanLog, notify, loadRemoteFiles, refreshAfterLocal, onCrossPanelDrop, performLocalLocalTransfer, remoteActionGuard, captureRemoteTarget, stopCount, onExternalFileDrop]);
 
     /**
      * Panel-level drag over (for cross-panel drops on empty space)
@@ -424,7 +433,14 @@ export function useDragAndDrop({
         targetPanelKey: PanelKey
     ) => {
         e.preventDefault();
-        if (!dragData || dragData.panelKey === targetPanelKey) return;
+        if (!dragData) {
+            if (targetPanelKey === 'remote' && onExternalFileDrop && Array.from(e.dataTransfer.types || []).includes('Files')) {
+                e.dataTransfer.dropEffect = 'copy';
+                setCrossPanelTarget(targetPanelKey);
+            }
+            return;
+        }
+        if (dragData.panelKey === targetPanelKey) return;
         const sourceIsRemote = dragData.panelKey === 'remote';
         const targetIsRemote = targetPanelKey === 'remote';
         if (sourceIsRemote === targetIsRemote) {
@@ -441,7 +457,7 @@ export function useDragAndDrop({
             e.dataTransfer.dropEffect = 'copy';
         }
         setCrossPanelTarget(targetPanelKey);
-    }, [dragData, currentLocalPath, currentLocalPath2]);
+    }, [dragData, currentLocalPath, currentLocalPath2, onExternalFileDrop]);
 
     /**
      * Panel-level drop (cross-panel drop on empty space → use current directory)
@@ -457,6 +473,10 @@ export function useDragAndDrop({
 
         if (!dragData || dragData.panelKey === targetPanelKey) {
             setCrossPanelTarget(null);
+            if (!dragData && targetPanelKey === 'remote') {
+                const files = Array.from(e.dataTransfer.files || []);
+                if (files.length) await onExternalFileDrop?.(files, currentRemotePath, stops);
+            }
             return;
         }
 
@@ -489,7 +509,7 @@ export function useDragAndDrop({
         if (!sourceIsRemote && !targetIsRemote && sourceKey !== targetPanelKey) {
             await performLocalLocalTransfer(sourcePaths, files, targetDir, ctrlKey, sourceKey, targetPanelKey, stops);
         }
-    }, [dragData, currentRemotePath, currentLocalPath, currentLocalPath2, onCrossPanelDrop, performLocalLocalTransfer, notify, stopCount]);
+    }, [dragData, currentRemotePath, currentLocalPath, currentLocalPath2, onCrossPanelDrop, performLocalLocalTransfer, notify, stopCount, onExternalFileDrop]);
 
     /**
      * Panel-level drag leave

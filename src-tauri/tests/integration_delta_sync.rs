@@ -553,6 +553,135 @@ fn sha256_hex(path: &Path) -> String {
         .to_string()
 }
 
+/// The interactive GUI's single-file adapter, against real SSH + stock
+/// rsync. A same-size, same-mtime overwrite must reuse remote blocks rather
+/// than skip the edit or resend a compressible full file. This deliberately
+/// avoids sync_tree_core and every directory/batch planner.
+#[cfg(all(target_os = "linux", feature = "aerorsync"))]
+#[tokio::test]
+#[ignore = "requires docker fixture"]
+async fn single_file_native_delta_overwrite_reuses_blocks_and_preserves_sha256() {
+    use ftp_client_gui_lib::delta_sync_rsync::{
+        try_delta_transfer_with_progress, SyncDirection as DeltaDirection,
+    };
+
+    const TEST: &str = "single_file_native_delta_overwrite_reuses_blocks_and_preserves_sha256";
+    require_key_auth_fixture(TEST);
+    let mut provider: Box<dyn StorageProvider> = Box::new(SftpProvider::new(SftpConfig {
+        host: "127.0.0.1".to_string(),
+        port: 2222,
+        username: "testuser".to_string(),
+        password: None,
+        private_key_path: Some(ssh_key_path().to_string_lossy().into_owned()),
+        key_passphrase: None,
+        initial_path: Some("/workdir".to_string()),
+        timeout_secs: 15,
+        trust_unknown_hosts: true,
+    }));
+    provider.connect().await.expect("connect fixture SFTP");
+    let transport = provider
+        .as_any_mut()
+        .downcast_mut::<SftpProvider>()
+        .unwrap()
+        .delta_transport()
+        .expect("connected key-auth session must offer delta");
+    assert_eq!(
+        transport.name(),
+        "aerorsync-proto-31",
+        "native transport required"
+    );
+    drop(transport);
+
+    let local_root = tempfile::tempdir().expect("local tempdir");
+    let payload = local_root.path().join("报告 final.bin");
+    const SIZE: usize = 8 * 1024 * 1024;
+    // Deterministic noise prevents compression from making a full resend
+    // look like a successful delta in the wire-byte assertion below.
+    let mut state = 0xC0FF_EE11_2233_4455_u64;
+    let mut bytes = vec![0; SIZE];
+    for byte in &mut bytes {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state as u8;
+    }
+    std::fs::write(&payload, &bytes).expect("write baseline source");
+    let mtime = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+    filetime::set_file_mtime(&payload, mtime).expect("set baseline mtime");
+    let baseline_sha = sha256_hex(&payload);
+    let remote_root = unique_remote_root("single-file-delta");
+    let remote_file = format!("{remote_root}/报告 final.bin");
+    provider
+        .mkdir(&remote_root)
+        .await
+        .expect("create remote parent");
+    provider
+        .upload(payload.to_str().unwrap(), &remote_file, None)
+        .await
+        .expect("seed remote baseline through SFTP");
+    let remote_metadata =
+        ssh_exec_shell(&format!("stat -c '%s %Y' '{remote_file}'")).expect("stat baseline");
+    assert_eq!(remote_metadata.trim(), format!("{SIZE} 1700000000"));
+
+    for offset in [64 * 1024, SIZE / 2, SIZE - 128 * 1024] {
+        for byte in &mut bytes[offset..offset + 4096] {
+            *byte ^= 0xA5;
+        }
+    }
+    std::fs::write(&payload, &bytes).expect("write three changed blocks");
+    filetime::set_file_mtime(&payload, mtime).expect("preserve original mtime");
+    let expected_sha = sha256_hex(&payload);
+    assert_ne!(expected_sha, baseline_sha, "source bytes really changed");
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let captured = progress.clone();
+    let result = try_delta_transfer_with_progress(
+        provider.as_mut(),
+        DeltaDirection::Upload,
+        &payload,
+        &remote_file,
+        Some(Box::new(move |sent, total| {
+            captured.lock().unwrap().push((sent, total));
+        })),
+    )
+    .await
+    .expect("single-file adapter must attempt delta");
+    assert!(result.used_delta, "delta must complete: {result:?}");
+    assert!(
+        result.fallback_reason.is_none(),
+        "no classic fallback: {result:?}"
+    );
+    assert!(result.hard_error.is_none(), "no hard refusal: {result:?}");
+    let stats = result
+        .stats
+        .expect("completed delta must report actual stats");
+    assert_eq!(stats.total_size, SIZE as u64);
+    assert!(
+        stats.copy_blocks > 0,
+        "must reuse real remote blocks: {stats:?}"
+    );
+    assert!(stats.bytes_sent > 0, "changed blocks must cross the wire");
+    assert!(
+        stats.bytes_sent + stats.bytes_received < SIZE as u64 / 4,
+        "three changed blocks must use far less wire traffic than a full upload: {stats:?}"
+    );
+    assert!(
+        !progress.lock().unwrap().is_empty(),
+        "interactive progress required"
+    );
+    let remote_sha = ssh_exec_shell(&format!("sha256sum '{remote_file}'"))
+        .expect("hash reconstructed remote file");
+    assert_eq!(
+        remote_sha.split_whitespace().next(),
+        Some(expected_sha.as_str())
+    );
+    eprintln!(
+        "{TEST}: copy_blocks={}, sent={}, received={}, total={}, sha256={expected_sha}",
+        stats.copy_blocks, stats.bytes_sent, stats.bytes_received, stats.total_size
+    );
+    cleanup_remote_tree(&mut provider, &remote_root).await;
+    provider.disconnect().await.expect("disconnect fixture");
+}
+
 /// Product path: SftpProvider::connect + sync_tree_core must preserve
 /// Linux access ACL (uid 65534 r-- plus mask r--) and a binary user.*
 /// xattr without constructing AerorsyncDeltaTransport in the test.

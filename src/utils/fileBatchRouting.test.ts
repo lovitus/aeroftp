@@ -172,6 +172,14 @@ describe('keepsSingleFilePath', () => {
     expect(keepsSingleFilePath({ ...base, protocol: 'sftp', destinationExists: true, direction: 'upload' })).toBe(true);
   });
 
+  it('an explicit rsync preference keeps new and renamed SFTP uploads on the single-file path', () => {
+    const upload = { ...base, direction: 'upload' as const, protocol: 'sftp', preferDelta: true };
+    expect(keepsSingleFilePath(upload)).toBe(true);
+    expect(keepsSingleFilePath({ ...upload, renamed: true })).toBe(true);
+    expect(keepsSingleFilePath({ ...upload, protocol: 'ftp' })).toBe(false);
+    expect(keepsSingleFilePath({ ...upload, direction: 'download' })).toBe(false);
+  });
+
   it('a renamed SFTP target is a new file: batch', () => {
     expect(keepsSingleFilePath({ ...base, protocol: 'sftp', destinationExists: true, renamed: true })).toBe(false);
   });

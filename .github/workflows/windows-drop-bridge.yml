@@ -1,0 +1,42 @@
+name: Windows Drop Bridge
+
+# Focused validation; does not build the AeroFTP backend or trigger its matrix.
+on:
+  push:
+    branches: [fix/external-drop-rsync]
+    paths:
+      - src-tauri/src/windows_external_drop.rs
+      - tests/windows-drop-bridge/**
+      - .github/workflows/windows-drop-bridge.yml
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA to check
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-pc-windows-msvc
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tests/windows-drop-bridge -> target
+      - name: Compile full production bridge and run schema/origin tests
+        run: cargo test --manifest-path tests/windows-drop-bridge/Cargo.toml --target x86_64-pc-windows-msvc --lib -- --nocapture
+      - name: Compile development origin configuration
+        env:
+          RUSTFLAGS: --cfg dev
+        run: cargo check --manifest-path tests/windows-drop-bridge/Cargo.toml --target x86_64-pc-windows-msvc --lib

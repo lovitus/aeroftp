@@ -387,6 +387,7 @@ import { FolderOverwriteDialog, FolderMergeAction } from './components/FolderOve
 import { BatchRenameDialog, BatchRenameFile, type BatchRenameSibling } from './components/BatchRenameDialog';
 import { CyberToolsModal } from './components/CyberToolsModal';
 import { nativeDropOwnerAt } from './utils/nativeDropOwner';
+import { resolveExternalFiles, type ExternalUploadFile } from './utils/externalFileDrop';
 import { useLockNow } from './hooks/useLockNow';
 import { LockNowError } from './components/LockNowError';
 import { LockScreen } from './components/LockScreen';
@@ -563,7 +564,7 @@ import { TransferProgressBar } from './components/TransferProgressBar';
 import { ImageThumbnail } from './components/ImageThumbnail';
 import { signatureOf } from './utils/thumbnailCache';
 import { loadOverwriteDestination } from './utils/overwriteDestination';
-import { FolderTransferFailedError, fileBatchCommand, folderTransferFailure, folderTransferIsComplete, keepsSingleFilePath, splitForFileBatch } from './utils/fileBatchRouting';
+import { FolderTransferFailedError, fileBatchCommand, folderTransferFailure, folderTransferIsComplete, keepsSingleFilePath, splitForFileBatch, canRunFileBatch } from './utils/fileBatchRouting';
 import type { FileBatchDirection, FileBatchSessionFlags, FolderTransferOutcome } from './utils/fileBatchRouting';
 import type { SortField, SortOrder } from './components/SortableHeader';
 import { FeatureBadge } from './components/FeatureBadge';
@@ -7693,6 +7694,7 @@ const App: React.FC = () => {
   }, [showHiddenFiles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Drag & Drop (cross-panel callback set below after upload/download are defined)
+  const externalFileDropRef = React.useRef<((files: File[], targetDir: string, stops?: number) => Promise<void>) | null>(null);
   const crossPanelDropRef = React.useRef<((files: { name: string; path: string }[], fromRemote: boolean, targetDir: string, sourceKey: 'remote' | 'local' | 'local2', target?: RemoteDragTarget, stops?: number) => Promise<void>) | null>(null);
 
   const {
@@ -7714,6 +7716,9 @@ const App: React.FC = () => {
     connectionParams: liveConnectionParams,
     onCrossPanelDrop: async (files, fromRemote, targetDir, sourceKey, target, stops) => {
       await crossPanelDropRef.current?.(files, fromRemote, targetDir, sourceKey, target, stops);
+    },
+    onExternalFileDrop: async (files, targetDir, stops) => {
+      await externalFileDropRef.current?.(files, targetDir, stops);
     },
     // Called on a drop, long after the render that declares it.
     remoteActionGuard: () => remoteActionGuard(),
@@ -15018,7 +15023,7 @@ const App: React.FC = () => {
     // delete the source); only the panel entry points honour auto-start OFF.
     // A caller that started before a wait (a picker, a listing, a paste of
     // files cut earlier) passes the target it took then.
-    options: { allowStaging?: boolean; queuedTarget?: QueuedTarget; targetEpoch?: number } = {},
+    options: { allowStaging?: boolean; queuedTarget?: QueuedTarget; targetEpoch?: number; preferDelta?: boolean } = {},
   ): Promise<FileBatchResult> => {
     const initialStops = stopCountRef.current;
     // Taken before any await: the listing and the overwrite questions below
@@ -15147,6 +15152,7 @@ const App: React.FC = () => {
         destinationExists: overwriteResult.destinationExists,
         renamed: !!overwriteResult.newName,
         destinationClaimed: claimedDestinations.has(claimKey),
+        preferDelta: options.preferDelta,
       });
       claimedDestinations.add(claimKey);
       // Rename must preserve every source, including a name that was free
@@ -15419,12 +15425,12 @@ const App: React.FC = () => {
   });
 
   // Upload files (Selected or Dialog)
-  const uploadMultipleFiles = withBatchLatch(async (filesOverride?: string[], localPanelId: 'local' | 'local2' = focusedLocalPanelId, remoteDir: string = currentRemotePath, stopsAtStart?: number) => {
+  const uploadMultipleFiles = withBatchLatch(async (filesOverride?: string[], localPanelId: 'local' | 'local2' = focusedLocalPanelId, remoteDir: string = currentRemotePath, stopsAtStart?: number, external?: { files: ExternalUploadFile[]; queuedTarget: QueuedTarget; targetEpoch: number }) => {
     // A drop hands the Stop count it took before its own awaits (M6).
     const stops = stopsAtStart ?? stopCountRef.current;
     if (!isConnected) return;
     // The target its Start and Retry are bound to, taken before any await.
-    const queuedTarget = snapshotQueuedTarget();
+    const queuedTarget = external?.queuedTarget ?? snapshotQueuedTarget();
     const onQueuedTarget = queuedTargetGuard(queuedTarget);
     // Checked inside each transfer right before its native dispatch, after
     // its own awaits (destination listing, overwrite question): this
@@ -15434,7 +15440,7 @@ const App: React.FC = () => {
       if (stopCountRef.current !== stops) throw new Error('Transfer cancelled');
     };
     let expectedGuiTarget: number;
-    try { expectedGuiTarget = await captureGuiTarget(onQueuedTarget); }
+    try { expectedGuiTarget = external?.targetEpoch ?? await captureGuiTarget(onQueuedTarget); onQueuedTarget(); }
     catch (error) { notify.error(t('toast.uploadFailed'), String(error)); return; }
     if (stopCountRef.current !== stops) return;
     // A timeout or 5xx can follow a committed upload. Providers own their safe
@@ -15449,7 +15455,7 @@ const App: React.FC = () => {
     resetOverwriteSettings();
 
     // Use override or fallback to selected state
-    const targetNames = filesOverride || Array.from(panel.selection);
+    const targetNames = external ? [] : filesOverride || Array.from(panel.selection);
 
     // A drop on a folder row writes into that folder, which the panel may
     // not list: its own listing decides what an upload would overwrite. A
@@ -15885,8 +15891,9 @@ const App: React.FC = () => {
       }
     }
 
-    // Priority 2: Open Dialog if no selection
-    const selected = await pickFile({
+    // External drops use the same explicit-path upload flow as the file picker.
+    // Never navigate the local panel or substitute its selected rows.
+    const selected = external?.files.map(file => file.path) ?? await pickFile({
       multiple: true,
       directory: false,
       title: t('dialog.selectFilesToUpload'),
@@ -15901,16 +15908,19 @@ const App: React.FC = () => {
       const picked = files.map(filePath => ({
         name: filePath.replace(/^.*[\\\/]/, ''),
         sourcePath: filePath,
-        size: 0, // unknown here; the backend reads it from the disk
-        modified: null,
+        size: external?.files.find(file => file.path === filePath)?.size ?? 0,
+        modified: external?.files.find(file => file.path === filePath)?.modified ?? null,
         is_dir: false,
       }));
-      const { batch: pickedBatch } = splitForFileBatch(picked, fileBatchSessionFlags('upload'));
+      const flags = fileBatchSessionFlags('upload');
+      // The shared planner preserves overwrite/resume and rsync routing, even
+      // for one external file. Git/overlay sessions retain their special flow.
+      const pickedBatch = external && canRunFileBatch(flags) ? picked : splitForFileBatch(picked, flags).batch;
       if (pickedBatch.length > 0) {
         resetOverwriteSettings();
         // The target taken before the picker opened: the user can switch tabs
         // while it is open.
-        const outcome = await runFileBatch('upload', pickedBatch, remoteDir, { queuedTarget, targetEpoch: expectedGuiTarget });
+        const outcome = await runFileBatch('upload', pickedBatch, remoteDir, { queuedTarget, targetEpoch: expectedGuiTarget, preferDelta: !!external });
         if (!outcome.aborted && !outcome.staged) loadRemoteFiles();
         return;
       }
@@ -16102,6 +16112,31 @@ const App: React.FC = () => {
       }
     }
   });
+
+  const uploadExternalFiles = useLatestCallback(async (files: File[], targetDir: string, stopsAtStart?: number) => {
+    if (!isConnected || showConnectionScreen || showVaultPanel || showCyberTools) return;
+    // Commit-backed and vault sessions require their dedicated upload UI; do
+    // not route an OS drop into a picker flow that can return before it writes.
+    if (!canRunFileBatch(fileBatchSessionFlags('upload'))) {
+      notify.error(t('toast.uploadFailed'), 'External file drops are not supported for this session');
+      return;
+    }
+    const stops = stopsAtStart ?? stopCountRef.current;
+    const queuedTarget = snapshotQueuedTarget();
+    const check = queuedTargetGuard(queuedTarget);
+    try {
+      // Freeze ownership before the path bridge resolves; switching servers or
+      // pressing Stop while it is pending must never send to a new destination.
+      const targetEpoch = await captureGuiTarget(check);
+      const sources = await resolveExternalFiles(files);
+      check();
+      if (stopCountRef.current !== stops) return;
+      await uploadMultipleFiles([], focusedLocalPanelId, targetDir, stops, { files: sources, queuedTarget, targetEpoch });
+    } catch (error) {
+      notify.error(t('toast.uploadFailed'), String(error));
+    }
+  });
+  useLayoutEffect(() => { externalFileDropRef.current = uploadExternalFiles; });
 
   // === Bulk Operations ===
   const downloadMultipleFiles = withBatchLatch(async (filesOverride?: string[], localDir: string = currentLocalPath, dragTarget?: RemoteDragTarget, stopsAtStart?: number) => {

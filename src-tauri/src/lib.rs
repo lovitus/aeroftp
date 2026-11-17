@@ -89,6 +89,8 @@ mod openai_responses;
 mod rar5_hardlink_tests;
 #[cfg(target_os = "linux")]
 mod ui_server;
+#[cfg(windows)]
+mod windows_external_drop;
 
 /// Registered Tauri (GUI) command names, generated at build time from the
 /// `tauri::generate_handler!` block in this file. Consumed by `aeroftp-cli
@@ -27614,6 +27616,8 @@ pub fn run() {
                 None => main_builder,
             };
             let _main = main_builder.build()?;
+            #[cfg(windows)]
+            windows_external_drop::install(&_main);
             // A crashed WebKitGTK web process otherwise leaves the window grey
             // until the app is restarted from the tray.
             #[cfg(target_os = "linux")]

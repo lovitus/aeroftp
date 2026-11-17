@@ -102,9 +102,12 @@ export function keepsSingleFilePath(file: {
   destinationExists: boolean;
   renamed: boolean;
   destinationClaimed: boolean;
+  /** Explicit-path uploads can prefer rsync even when the destination is new. */
+  preferDelta?: boolean;
 }): boolean {
   if (!file.isProviderSession) return false;
   if (file.destinationClaimed) return true;
+  if (file.preferDelta && file.direction === 'upload' && file.protocol === 'sftp') return true;
   if (file.direction === 'upload' && file.action === 'resume') return true;
   return file.protocol === 'sftp' && file.destinationExists && !file.renamed;
 }

@@ -341,6 +341,9 @@ whisper-rs = { version = "0.16.0", optional = true }
 
 # Windows Explorer badge integration (v2.0.5) + MTP/WPD portable devices (Phase 3)
 [target.'cfg(windows)'.dependencies]
+# Match Tauri/Wry's locked WebView2 COM interfaces; existing Win32 code stays on 0.58.
+webview2-com = "0.38.2"
+windows-core = "0.61"
 windows = { version = "0.58", features = [
     "Win32_Storage_CloudFilters",
     "Win32_Foundation",

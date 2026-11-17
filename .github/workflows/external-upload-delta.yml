@@ -8,6 +8,9 @@ on:
     paths:
       - '.github/workflows/external-upload-delta.yml'
       - 'src-tauri/tests/integration_delta_sync.rs'
+      - 'src-tauri/build.rs'
+      - 'src-tauri/Cargo.toml'
+      - 'src-tauri/Cargo.lock'
   workflow_dispatch:
 
 permissions:

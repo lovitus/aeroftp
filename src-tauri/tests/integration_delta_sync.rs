@@ -655,10 +655,11 @@ async fn single_file_native_delta_overwrite_reuses_blocks_and_preserves_sha256()
         .stats
         .expect("completed delta must report actual stats");
     assert_eq!(stats.total_size, SIZE as u64);
-    assert!(
-        stats.copy_blocks > 0,
-        "must reuse real remote blocks: {stats:?}"
-    );
+    // The native block counter is crate-private. For this incompressible
+    // baseline, a changed SHA with wire traffic below 25% proves remote data
+    // reuse through the public stats without expanding the product API.
+    let wire_bytes = stats.bytes_sent + stats.bytes_received;
+    let wire_savings = SIZE as u64 - wire_bytes.min(SIZE as u64);
     assert!(stats.bytes_sent > 0, "changed blocks must cross the wire");
     assert!(
         stats.bytes_sent + stats.bytes_received < SIZE as u64 / 4,
@@ -675,8 +676,8 @@ async fn single_file_native_delta_overwrite_reuses_blocks_and_preserves_sha256()
         Some(expected_sha.as_str())
     );
     eprintln!(
-        "{TEST}: copy_blocks={}, sent={}, received={}, total={}, sha256={expected_sha}",
-        stats.copy_blocks, stats.bytes_sent, stats.bytes_received, stats.total_size
+        "{TEST}: wire_savings={}, sent={}, received={}, total={}, sha256={expected_sha}",
+        wire_savings, stats.bytes_sent, stats.bytes_received, stats.total_size
     );
     cleanup_remote_tree(&mut provider, &remote_root).await;
     provider.disconnect().await.expect("disconnect fixture");

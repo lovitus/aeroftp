@@ -1,0 +1,134 @@
+name: External Upload Native Delta
+
+# Fork-only validation of the single-file upload adapter against stock rsync.
+# Push triggers do not depend on workflow_dispatch being indexed on the default branch.
+on:
+  push:
+    branches: ['fix/external-drop-rsync']
+    paths:
+      - '.github/workflows/external-upload-delta.yml'
+      - 'src-tauri/tests/integration_delta_sync.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  single-file-delta:
+    name: Single-file native delta (key-auth fixture)
+    runs-on: ubuntu-latest
+    # Cold-cache compilation still builds the Tauri library and its large graph.
+    # Keep a generous named compile/test budget within an 80-minute job backstop.
+    timeout-minutes: 80
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install Rust
+        timeout-minutes: 3
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Rust cache
+        timeout-minutes: 5
+        uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: './src-tauri -> target'
+          shared-key: linux-dev
+          # Join the existing Linux test-profile family without adding a saver.
+          save-if: false
+
+      - name: Install system dependencies
+        timeout-minutes: 13
+        uses: ./.github/actions/apt-install
+        with:
+          # Tauri remains in the test graph; aerorsync needs the ACL headers.
+          packages: >-
+            rsync openssh-client acl attr libacl1 libacl1-dev
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+
+      - name: Generate fixture SSH key
+        timeout-minutes: 1
+        working-directory: src-tauri/tests/fixtures/sftp-rsync
+        run: bash setup.sh
+
+      - name: Build and start key-auth fixture
+        timeout-minutes: 5
+        working-directory: src-tauri/tests/fixtures/sftp-rsync
+        run: docker compose up -d --build
+
+      - name: Wait for fixture SSH
+        timeout-minutes: 2
+        run: |
+          for i in $(seq 1 20); do
+            if ssh -i src-tauri/tests/fixtures/sftp-rsync/ssh_key \
+                   -o StrictHostKeyChecking=no \
+                   -o UserKnownHostsFile=/dev/null \
+                   -o BatchMode=yes \
+                   -o ConnectTimeout=2 \
+                   -p 2222 testuser@127.0.0.1 'true' 2>/dev/null; then
+              echo "Fixture SSH ready after $((i * 2))s"
+              exit 0
+            fi
+            echo "Waiting for fixture SSH... ($i/20)"
+            sleep 2
+          done
+          docker logs aeroftp-delta-sync-fixture >&2 || true
+          exit 1
+
+      - name: Single-file native delta overwrite preserves SHA-256
+        timeout-minutes: 45
+        working-directory: src-tauri
+        # Keep native rsync enabled while omitting local-stt/whisper.cpp and
+        # Proton. build.rs preserves feature cfgs in its command registry.
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features aerorsync \
+            --test integration_delta_sync \
+            single_file_native_delta_overwrite_reuses_blocks_and_preserves_sha256 -- \
+            --ignored --exact --nocapture 2>&1 \
+            | tee "${{ runner.temp }}/external-upload-delta.log"
+          ../scripts/assert-tests-ran.sh "${{ runner.temp }}/external-upload-delta.log" =1 \
+            "Single-file native delta overwrite"
+
+      - name: Capture fixture diagnostics
+        if: always()
+        timeout-minutes: 1
+        working-directory: src-tauri/tests/fixtures/sftp-rsync
+        run: |
+          docker compose ps > "${{ runner.temp }}/external-upload-delta-fixture.log" 2>&1 || true
+          docker logs aeroftp-delta-sync-fixture >> "${{ runner.temp }}/external-upload-delta-fixture.log" 2>&1 || true
+
+      - name: Upload delta evidence
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: external-upload-delta-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/external-upload-delta.log
+            ${{ runner.temp }}/external-upload-delta-fixture.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Teardown fixture
+        if: always()
+        timeout-minutes: 1
+        working-directory: src-tauri/tests/fixtures/sftp-rsync
+        run: docker compose down -v

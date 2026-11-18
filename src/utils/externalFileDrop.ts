@@ -48,8 +48,8 @@ export async function resolveExternalFiles(files: readonly File[]): Promise<Exte
         unlisten = off;
         timeout = setTimeout(() => reject(new Error('External file drop resolution timed out')), 10000);
         try {
-          // Wry's earlier WebMessageReceived handler reads strings. An object
-          // message fails there before our native file handler can receive it.
+          // Wry's earlier WebMessageReceived handler reads strings. Keep this
+          // message compatible instead of making it return E_INVALIDARG.
           bridge.postMessageWithAdditionalObjects(JSON.stringify({ kind: 'aeroftp.external-drop.resolve', version: 1, requestId }), [...files]);
         } catch (error) { reject(error); }
       }, reject);

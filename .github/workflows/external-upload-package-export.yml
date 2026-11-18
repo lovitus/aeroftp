@@ -1,0 +1,37 @@
+name: Export Verified External Upload Package
+on:
+  push:
+    branches: ['fix/external-drop-rsync']
+    paths: ['.github/workflows/external-upload-package-export.yml']
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: write
+jobs:
+  export-verified-package:
+    if: github.repository == 'lovitus/aeroftp' && github.ref == 'refs/heads/fix/external-drop-rsync'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Require both source validation runs to have succeeded
+        run: |
+          set -euo pipefail
+          for run in 44265152996 44265152967; do
+            conclusion=$(gh run view "$run" --json conclusion --jq .conclusion)
+            test "$conclusion" = success
+          done
+      - name: Download the exact verified Windows artifact on the runner
+        run: gh run download 44265152996 --name aeroftp-external-upload-windows-x64-ce49693933a2f0efa394782e081f8111cf9105e6 --dir package
+      - name: Verify all package hashes before exporting
+        working-directory: package
+        run: sha256sum --check SHA256SUMS.txt
+      - name: Store the unchanged packages in an unpublished fork draft
+        run: |
+          set -euo pipefail
+          gh release create external-drop-preview-ce49693 package/* \
+            --draft --target ce49693933a2f0efa394782e081f8111cf9105e6 \
+            --title 'External drop and rsync preview (CI verified)' \
+            --notes 'Unpublished validation download for the fork owner. Exact packages from successful Windows run 44265152996; modern and rsync 3.1.1 transfer run 44265152967 also passed. SHA256SUMS.txt is unchanged. This draft is not an upstream or public release.'

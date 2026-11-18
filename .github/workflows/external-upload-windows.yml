@@ -163,6 +163,17 @@ jobs:
           if ($summary -notmatch 'test result: ok\. (\d+) passed;' -or [int]$Matches[1] -lt 2) {
             throw 'Expected at least two production windows_external_drop tests; empty filters are not success'
           }
+      - name: Legacy zlibx streaming regression test
+        working-directory: src-tauri
+        timeout-minutes: 5
+        env:
+          AEROFTP_EMBED_TEST_MANIFEST: '1'
+        run: |
+          $output = @(cargo test --locked --release --lib --no-default-features --features aerorsync,proton-native streaming_zlibx_preserves_adjacent_literal_flushes_across_batches -- --nocapture 2>&1)
+          $status = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+          if ($status -ne 0) { exit $status }
+          if (($output -join [Environment]::NewLine) -notmatch 'test result: ok\. 1 passed;') { throw 'Expected exactly one zlibx streaming regression test' }
       - name: Package portable GUI, runtime DLLs and hash manifests
         timeout-minutes: 10
         run: ./.github/scripts/external-upload-windows-package.ps1

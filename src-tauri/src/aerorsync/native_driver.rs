@@ -550,7 +550,10 @@ enum LiteralCompression {
 /// source slab.
 enum StreamingLiteralEncoder {
     Zstd(ZstdLiteralStreamEncoder),
-    Deflate(DeflateLiteralStreamEncoder),
+    Deflate {
+        encoder: DeflateLiteralStreamEncoder,
+        literal_run_open: bool,
+    },
     None,
 }
 
@@ -560,7 +563,10 @@ impl StreamingLiteralEncoder {
             LiteralCompression::Zstd => ZstdLiteralStreamEncoder::new()
                 .map(Self::Zstd)
                 .map_err(|e| map_realwire_error(e, "zstd streaming encoder")),
-            LiteralCompression::Deflate => Ok(Self::Deflate(DeflateLiteralStreamEncoder::new())),
+            LiteralCompression::Deflate => Ok(Self::Deflate {
+                encoder: DeflateLiteralStreamEncoder::new(),
+                literal_run_open: false,
+            }),
             LiteralCompression::None => Ok(Self::None),
             LiteralCompression::Unsupported(name) => Err(unsupported_compressor_error(&name)),
         }
@@ -571,10 +577,35 @@ impl StreamingLiteralEncoder {
             Self::Zstd(encoder) => encoder
                 .compress_literal(literal)
                 .map_err(|e| map_realwire_error(e, "zstd compress streaming literal")),
-            Self::Deflate(encoder) => encoder
-                .compress_literal(literal)
-                .map_err(|e| map_realwire_error(e, "deflate compress streaming literal")),
+            Self::Deflate {
+                encoder,
+                literal_run_open,
+            } => {
+                let mut compressed = encoder
+                    .compress_literal(literal)
+                    .map_err(|e| map_realwire_error(e, "deflate compress streaming literal"))?;
+                if !literal.is_empty() {
+                    // Stock recv_deflated_token restores the stripped sync tail
+                    // only at a copy token or END, not between DEFLATED_DATA
+                    // records. Slab boundaries within one literal run must
+                    // therefore retain the preceding compressor flush.
+                    if *literal_run_open {
+                        drop(compressed.splice(..0, [0x00, 0x00, 0xff, 0xff]));
+                    }
+                    *literal_run_open = true;
+                }
+                Ok(compressed)
+            }
             Self::None => Ok(literal.to_vec()),
+        }
+    }
+
+    fn end_literal_run(&mut self) {
+        if let Self::Deflate {
+            literal_run_open, ..
+        } = self
+        {
+            *literal_run_open = false;
         }
     }
 }
@@ -3260,6 +3291,7 @@ impl<T: RawRemoteShellTransport> AerorsyncDriver<T> {
                     }
                 }
                 EngineDeltaOp::CopyBlock(idx) => {
+                    encoder.end_literal_run();
                     self.session_stats.copy_blocks =
                         self.session_stats.copy_blocks.saturating_add(1);
                     let wire_op = DeltaOp::CopyRun {
@@ -5820,6 +5852,58 @@ mod tests {
         let decoded = decode_client_preamble(&sink).unwrap();
         assert_eq!(decoded.checksum_algos, p.checksum_algos);
         assert_eq!(decoded.compression_algos, p.compression_algos);
+    }
+
+    #[test]
+    fn streaming_zlibx_preserves_adjacent_literal_flushes_across_batches() {
+        let mut driver = make_driver(mock_transport());
+        let mut encoder = StreamingLiteralEncoder::new(LiteralCompression::Deflate).unwrap();
+        let mut state = DeltaStreamState::new();
+        let mut payload = Vec::new();
+        // Separate batches model source-slab boundaries. Each literal also
+        // exceeds the 14-bit DEFLATED_DATA record limit, exercising framing.
+        let first = incompressible_payload(0x3110_0001, 64 * 1024 + 17);
+        let second = incompressible_payload(0x3110_0002, 64 * 1024 + 19);
+        for literal in [&first, &second] {
+            driver
+                .append_streaming_delta_ops(
+                    [EngineDeltaOp::Literal(literal.clone())],
+                    &mut encoder,
+                    &mut state,
+                    &mut payload,
+                )
+                .unwrap();
+        }
+        // A copy ends the run: the stock receiver restores its tail itself.
+        driver
+            .append_streaming_delta_ops(
+                [
+                    EngineDeltaOp::CopyBlock(0),
+                    EngineDeltaOp::Literal(first.clone()),
+                ],
+                &mut encoder,
+                &mut state,
+                &mut payload,
+            )
+            .unwrap();
+        payload.push(TOKEN_END_FLAG);
+        let (report, consumed) = decode_delta_stream(&payload, 0, None).unwrap();
+        assert_eq!(consumed, payload.len());
+        let ops = driver
+            .delta_wire_to_engine_ops(&report.ops, &LiteralCompression::Deflate)
+            .expect("stock-style run decoder must restore tails only at Copy/END");
+        assert_eq!(ops.len(), 3);
+        let mut expected = first.clone();
+        expected.extend_from_slice(&second);
+        match &ops[0] {
+            EngineDeltaOp::Literal(bytes) => assert_eq!(bytes, &expected),
+            _ => panic!("first run must contain both source slabs"),
+        }
+        assert!(matches!(ops[1], EngineDeltaOp::CopyBlock(0)));
+        match &ops[2] {
+            EngineDeltaOp::Literal(bytes) => assert_eq!(bytes, &first),
+            _ => panic!("copy must end the first literal run"),
+        }
     }
 
     #[tokio::test]

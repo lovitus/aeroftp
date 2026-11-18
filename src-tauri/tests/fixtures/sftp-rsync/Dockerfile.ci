@@ -1,0 +1,47 @@
+# CI-only versioned rsync; SSH and fixture setup match the shared fixture.
+FROM alpine:3.19 AS rsync-build
+ARG RSYNC_VERSION=modern
+RUN apk add --no-cache rsync build-base curl acl-dev attr-dev \
+    && mkdir /out \
+    && if [ "$RSYNC_VERSION" = modern ]; then cp /usr/bin/rsync /out/rsync; \
+       elif [ "$RSYNC_VERSION" = 3.1.1 ]; then \
+         curl -fSL https://rsync.samba.org/ftp/rsync/src/rsync-3.1.1.tar.gz -o /tmp/rsync.tar.gz \
+         && echo '7de4364fcf5fe42f3bdb514417f1c40d10bbca896abe7e7f2c581c6ea08a2621  /tmp/rsync.tar.gz' | sha256sum -c - \
+         && tar -xzf /tmp/rsync.tar.gz -C /tmp \
+         && cd /tmp/rsync-3.1.1 \
+         && CFLAGS='-O2 -fcommon' ./configure --prefix=/usr --disable-iconv \
+         && make -j2 && cp rsync /out/rsync; \
+       else echo "Unsupported RSYNC_VERSION: $RSYNC_VERSION" >&2; exit 1; fi
+
+# Minimal SSH + rsync fixture for delta-sync integration tests.
+# Alpine-based to keep image small (~25 MB).
+
+FROM alpine:3.19
+
+RUN apk add --no-cache openssh rsync bash acl attr \
+    && ssh-keygen -A \
+    && adduser -D -s /bin/sh testuser \
+    && passwd -u testuser \
+    && mkdir -p /home/testuser/.ssh /workdir /mnt \
+    && chown -R testuser:testuser /home/testuser /workdir \
+    && chmod 700 /home/testuser/.ssh
+
+# Key-based auth only (Fase 1 scope).
+# StrictModes stays at its secure default (yes); the entrypoint script
+# normalizes ownership + mode on the bind-mounted authorized_keys so the
+# default check passes. This keeps the fixture posture honest while
+# avoiding a "StrictModes no" hack that could be copied elsewhere.
+RUN sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
+    && sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
+    && echo "AuthorizedKeysFile .ssh/authorized_keys" >> /etc/ssh/sshd_config
+
+COPY --from=rsync-build /out/rsync /usr/bin/rsync.real
+COPY rsync-ci.sh /usr/bin/rsync
+RUN chmod 755 /usr/bin/rsync
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
+
+EXPOSE 22
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

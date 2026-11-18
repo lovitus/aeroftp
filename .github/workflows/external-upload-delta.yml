@@ -8,6 +8,8 @@ on:
     paths:
       - '.github/workflows/external-upload-delta.yml'
       - 'src-tauri/tests/integration_delta_sync.rs'
+      - 'src-tauri/src/aerorsync/**'
+      - 'src-tauri/tests/fixtures/sftp-rsync/**'
       - 'src-tauri/build.rs'
       - 'src-tauri/Cargo.toml'
       - 'src-tauri/Cargo.lock'
@@ -18,7 +20,14 @@ permissions:
 
 jobs:
   single-file-delta:
-    name: Single-file native delta (key-auth fixture)
+    name: Single-file native delta (rsync ${{ matrix.rsync-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        rsync-version: [modern, "3.1.1"]
+    env:
+      RSYNC_VERSION: ${{ matrix.rsync-version }}
+      COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
     runs-on: ubuntu-latest
     # Cold-cache compilation still builds the Tauri library and its large graph.
     # Keep a generous named compile/test budget within an 80-minute job backstop.
@@ -72,9 +81,14 @@ jobs:
         run: bash setup.sh
 
       - name: Build and start key-auth fixture
-        timeout-minutes: 5
+        timeout-minutes: 8
         working-directory: src-tauri/tests/fixtures/sftp-rsync
-        run: docker compose up -d --build
+        run: |
+          docker compose up -d --build
+          docker exec aeroftp-delta-sync-fixture rsync --version
+          if [ "$RSYNC_VERSION" = 3.1.1 ]; then
+            docker exec aeroftp-delta-sync-fixture rsync --version | grep -F "version 3.1.1 "
+          fi
 
       - name: Wait for fixture SSH
         timeout-minutes: 2
@@ -95,7 +109,7 @@ jobs:
           docker logs aeroftp-delta-sync-fixture >&2 || true
           exit 1
 
-      - name: Single-file native delta overwrite preserves SHA-256
+      - name: Single-file native first upload and delta overwrite preserve SHA-256
         timeout-minutes: 45
         working-directory: src-tauri
         # Keep native rsync enabled while omitting local-stt/whisper.cpp and
@@ -104,10 +118,10 @@ jobs:
           set -o pipefail
           cargo test --no-default-features --features aerorsync \
             --test integration_delta_sync \
-            single_file_native_delta_overwrite_reuses_blocks_and_preserves_sha256 -- \
-            --ignored --exact --nocapture 2>&1 \
+            single_file_native_delta_ -- \
+            --ignored --nocapture --test-threads=1 2>&1 \
             | tee "${{ runner.temp }}/external-upload-delta.log"
-          ../scripts/assert-tests-ran.sh "${{ runner.temp }}/external-upload-delta.log" =1 \
+          ../scripts/assert-tests-ran.sh "${{ runner.temp }}/external-upload-delta.log" =2 \
             "Single-file native delta overwrite"
 
       - name: Capture fixture diagnostics
@@ -117,16 +131,19 @@ jobs:
         run: |
           docker compose ps > "${{ runner.temp }}/external-upload-delta-fixture.log" 2>&1 || true
           docker logs aeroftp-delta-sync-fixture >> "${{ runner.temp }}/external-upload-delta-fixture.log" 2>&1 || true
+          docker exec aeroftp-delta-sync-fixture sh -c 'rsync --version; cat /tmp/rsync-server.stderr' \
+            > "${{ runner.temp }}/external-upload-delta-server-stderr.log" 2>&1 || true
 
       - name: Upload delta evidence
         if: always()
         timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: external-upload-delta-${{ github.run_id }}-${{ github.run_attempt }}
+          name: external-upload-delta-${{ matrix.rsync-version }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/external-upload-delta.log
             ${{ runner.temp }}/external-upload-delta-fixture.log
+            ${{ runner.temp }}/external-upload-delta-server-stderr.log
           retention-days: 7
           if-no-files-found: warn
 

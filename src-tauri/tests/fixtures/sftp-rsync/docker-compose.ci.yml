@@ -1,0 +1,7 @@
+services:
+  sftp-rsync:
+    build:
+      context: .
+      dockerfile: Dockerfile.ci
+      args:
+        RSYNC_VERSION: ${RSYNC_VERSION:-modern}

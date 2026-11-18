@@ -145,7 +145,8 @@ fn receive(
         return None;
     }
     let message = com_string(
-        |value| unsafe { args.WebMessageAsJson(value) },
+        // Wry handles this event first and requires a string message too.
+        |value| unsafe { args.TryGetWebMessageAsString(value) },
         MAX_MESSAGE_UNITS,
     )
     .ok()?;

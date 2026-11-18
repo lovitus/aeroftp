@@ -6,7 +6,13 @@ import { resolveExternalFiles } from './externalFileDrop';
 
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); delete (window as unknown as { chrome?: unknown }).chrome; });
 function bridge(post: (message: { requestId: string }, files: File[]) => void) {
-  Object.assign(window, { chrome: { webview: { postMessageWithAdditionalObjects: post } } });
+  Object.assign(window, { chrome: { webview: { postMessageWithAdditionalObjects: (message: string, files: File[]) => {
+    // Model Wry's string-only IPC handler, which runs before the file bridge.
+    expect(typeof message).toBe('string');
+    const request = JSON.parse(message);
+    expect(request).toMatchObject({ kind: 'aeroftp.external-drop.resolve', version: 1 });
+    post(request, files);
+  } } } });
 }
 describe('WebView2 external file paths', () => {
   it('passes File objects without reading contents and correlates the native response', async () => {

@@ -183,7 +183,8 @@ async function bridge(synthetic = false) {
         const objects = synthetic
           ? [new File(["synthetic must fail"], "伪造 file.txt")]
           : Array.from(document.getElementById("aeroftp-ci-file-input").files);
-        window.chrome.webview.postMessageWithAdditionalObjects({ kind: 'aeroftp.external-drop.resolve', version: 1, requestId }, objects);
+        // Wry's preceding IPC handler requires a string WebMessage.
+        window.chrome.webview.postMessageWithAdditionalObjects(JSON.stringify({ kind: 'aeroftp.external-drop.resolve', version: 1, requestId }), objects);
       } catch (error) {
         complete({ kind: 'javascript-rejection', error: String(error) });
       }

@@ -15,7 +15,7 @@ interface ResolvedDrop {
 }
 
 type FileBridge = {
-  postMessageWithAdditionalObjects(message: unknown, objects: File[]): void;
+  postMessageWithAdditionalObjects(message: string, objects: File[]): void;
 };
 
 /** Resolve real disk paths without reading/staging file contents or disabling HTML5 DnD. */
@@ -48,7 +48,9 @@ export async function resolveExternalFiles(files: readonly File[]): Promise<Exte
         unlisten = off;
         timeout = setTimeout(() => reject(new Error('External file drop resolution timed out')), 10000);
         try {
-          bridge.postMessageWithAdditionalObjects({ kind: 'aeroftp.external-drop.resolve', version: 1, requestId }, [...files]);
+          // Wry's earlier WebMessageReceived handler reads strings. An object
+          // message fails there before our native file handler can receive it.
+          bridge.postMessageWithAdditionalObjects(JSON.stringify({ kind: 'aeroftp.external-drop.resolve', version: 1, requestId }), [...files]);
         } catch (error) { reject(error); }
       }, reject);
     });

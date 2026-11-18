@@ -43,6 +43,8 @@ jobs:
       - name: Install npm dependencies
         timeout-minutes: 10
         run: npm ci
+      - name: Check CI runtime driver syntax
+        run: node --check scripts/test-windows-external-drop.mjs
       - name: Typecheck
         timeout-minutes: 5
         run: npm run typecheck
@@ -112,6 +114,7 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
           prefix-key: external-upload-windows-v3-whisper-purge
+          cache-on-failure: true
       - name: Drop stale whisper CMake artifacts
         run: |
           foreach ($profile in @('debug', 'release')) {

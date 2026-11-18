@@ -1,7 +1,7 @@
 # CI-only versioned rsync; SSH and fixture setup match the shared fixture.
 FROM alpine:3.19 AS rsync-build
 ARG RSYNC_VERSION=modern
-RUN apk add --no-cache rsync build-base curl acl-dev attr-dev \
+RUN apk add --no-cache rsync build-base curl perl acl-dev attr-dev \
     && mkdir /out \
     && if [ "$RSYNC_VERSION" = modern ]; then cp /usr/bin/rsync /out/rsync; \
        elif [ "$RSYNC_VERSION" = 3.1.1 ]; then \
